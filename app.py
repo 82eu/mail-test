@@ -89,56 +89,64 @@ def index():
     return html, 200
 
 
-@app.route('/send', methods=['POST'])
+@app.route('/send', methods=['GET', 'POST'])
 def send():
-    """发邮件接口，返回 JSON 结果"""
-    smtp_server = os.environ.get('ALERT_SMTP_SERVER', 'smtp.gmail.com').strip()
-    from_addr = os.environ.get('ALERT_FROM_EMAIL', '').strip()
-    to_addr = os.environ.get('ALERT_TO_EMAIL', '').strip()
-    password = os.environ.get('ALERT_EMAIL_PASSWORD', '').strip()
-    port_str = os.environ.get('ALERT_SMTP_PORT', '465').strip()
-
-    if not from_addr or not to_addr or not password:
-        return jsonify({'success': False, 'error': '环境变量不完整。需要：ALERT_FROM_EMAIL, ALERT_TO_EMAIL, ALERT_EMAIL_PASSWORD',
-                       'detail': '当前读取到：ALERT_FROM_EMAIL=%s, ALERT_TO_EMAIL=%s, ALERT_SMTP_SERVER=%s, 密码长度=%d' % (
-                           from_addr[:20] if from_addr else '(空)',
-                           to_addr[:20] if to_addr else '(空)',
-                           smtp_server[:20] if smtp_server else '(空)',
-                           len(password))})
-
-    try: smtp_port = int(port_str)
-    except: smtp_port = 465
-
+    """发邮件接口（GET 也可以直接访问看结果）"""
     try:
+        smtp_server = os.environ.get('ALERT_SMTP_SERVER', 'smtp.gmail.com').strip()
+        from_addr = os.environ.get('ALERT_FROM_EMAIL', '').strip()
+        to_addr = os.environ.get('ALERT_TO_EMAIL', '').strip()
+        password = os.environ.get('ALERT_EMAIL_PASSWORD', '').strip()
+        port_str = os.environ.get('ALERT_SMTP_PORT', '465').strip()
+
+        if not from_addr or not to_addr or not password:
+            return jsonify({'success': False, 'error': '环境变量不完整',
+                           'detail': '当前读取到: ALERT_FROM_EMAIL=%s, ALERT_TO_EMAIL=%s, ALERT_SMTP_SERVER=%s, 密码长度=%d' % (
+                               from_addr[:20] if from_addr else '(空)',
+                               to_addr[:20] if to_addr else '(空)',
+                               smtp_server[:20] if smtp_server else '(空)',
+                               len(password))}), 200
+
+        try: smtp_port = int(port_str)
+        except: smtp_port = 465
+
         msg = MIMEMultipart("alternative")
         msg['Subject'] = '[ETH EMA 预警] 测试邮件 · %s' % time.strftime('%H:%M:%S')
         msg['From'] = from_addr
         msg['To'] = to_addr
-        body = '<html><body style="font-family:sans-serif;max-width:500px;margin:20px auto;padding:20px"><h2 style="color:#6366f1">✅ 邮件发送成功</h2><p>如果你看到这封邮件，说明 Gmail SMTP 配置完全正常，你的预警系统可以发邮件。</p><p>发送时间: %s</p><p>SMTP服务器: %s:%d</p><p>发件人: %s</p><p>收件人: %s</p></body></html>' % (
-            time.strftime('%Y-%m-%d %H:%M:%S'), smtp_server, smtp_port, from_addr, to_addr)
+        body = '<html><body style="font-family:sans-serif;max-width:500px;margin:20px auto;padding:20px"><h2>OK - 邮件发送成功</h2><p>SMTP: %s:%d</p><p>From: %s</p><p>To: %s</p><p>Time: %s</p></body></html>' % (
+            smtp_server, smtp_port, from_addr, to_addr, time.strftime('%Y-%m-%d %H:%M:%S'))
         msg.attach(MIMEText(body, 'html', 'utf-8'))
 
         ctx = ssl.create_default_context()
+
+        # 先试 SSL 465
+        err_text = ''
         try:
             with smtplib.SMTP_SSL(smtp_server, smtp_port, context=ctx, timeout=25) as s:
                 s.login(from_addr, password)
                 s.sendmail(from_addr, [to_addr], msg.as_string())
-            return jsonify({'success': True, 'message': '✅ SSL 465 发送成功！<br>收件人: <b>%s</b><br>请检查 QQ 邮箱收件箱（可能在「垃圾箱」或「广告邮件」里）。<br>现在回到你的主项目部署，用同样的环境变量即可。' % to_addr})
+            return jsonify({'success': True, 'message': 'SSL 465 发送成功！已发送到 %s。请检查 QQ 邮箱收件箱/垃圾箱。' % to_addr}), 200
         except Exception as e1:
-            err1 = str(e1)[:150]
-            try:
-                with smtplib.SMTP(smtp_server, 587, timeout=25) as s:
-                    s.starttls(context=ctx)
-                    s.login(from_addr, password)
-                    s.sendmail(from_addr, [to_addr], msg.as_string())
-                return jsonify({'success': True, 'message': '✅ STARTTLS 587 发送成功！<br>收件人: <b>%s</b><br>请检查 QQ 邮箱收件箱。' % to_addr})
-            except Exception as e2:
-                return jsonify({'success': False,
-                                'error': '两次发送都失败了',
-                                'detail': 'SSL 465 错误: %s\n\nSTARTTLS 587 错误: %s\n\n当前配置: server=%s, port=%d, from=%s, to=%s, 密码长度=%d' % (
-                                    err1, str(e2)[:150], smtp_server, smtp_port, from_addr[:20], to_addr[:20], len(password))})
+            err_text = 'SSL465: ' + str(e1)[:200]
+
+        # 再试 STARTTLS 587
+        try:
+            with smtplib.SMTP(smtp_server, 587, timeout=25) as s:
+                s.starttls(context=ctx)
+                s.login(from_addr, password)
+                s.sendmail(from_addr, [to_addr], msg.as_string())
+            return jsonify({'success': True, 'message': 'STARTTLS 587 发送成功！已发送到 %s。请检查 QQ 邮箱收件箱/垃圾箱。' % to_addr}), 200
+        except Exception as e2:
+            err_text += ' | STARTTLS587: ' + str(e2)[:200]
+
+        return jsonify({'success': False, 'error': '两次发送都失败',
+                       'detail': err_text + ' | 配置: server=%s port=%d from=%s to=%s pwd_len=%d' % (
+                           smtp_server, smtp_port, from_addr[:20], to_addr[:20], len(password))}), 200
     except Exception as e:
-        return jsonify({'success': False, 'error': '程序异常', 'detail': str(e)[:200]})
+        import traceback
+        return jsonify({'success': False, 'error': '程序异常: ' + str(e),
+                       'detail': traceback.format_exc()[-500:]}), 200
 
 
 if __name__ == '__main__':
