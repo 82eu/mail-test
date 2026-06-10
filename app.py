@@ -8,6 +8,14 @@ from email.mime.multipart import MIMEMultipart
 app = Flask(__name__)
 
 
+# 强制所有异常都返回 JSON（不再返回 HTML 500 页面）
+@app.errorhandler(Exception)
+def _err(e):
+    import traceback
+    tb = traceback.format_exc()
+    return '{"success":false,"error":"'+str(e).replace('"','\"').replace('\n',' ')+'","detail":"'+tb[-500:].replace('"','\"').replace('\n','\\n').replace('\r','')+'"}', 500, {'Content-Type': 'application/json; charset=utf-8'}
+
+
 @app.route('/')
 def index():
     """首页：显示环境变量检查 + 发送按钮"""
