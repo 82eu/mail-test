@@ -1,155 +1,187 @@
 #!/usr/bin/env python3
-"""极简邮件测试工具 - 部署到 Render 一键测试 Gmail"""
-from flask import Flask, request, jsonify
-import os, smtplib, ssl, time
+"""邮件测试 - 同时试 Gmail SSL 465 / Gmail STARTTLS 587 / Outlook STARTTLS 587"""
+from flask import Flask
+import os, smtplib, ssl, time, socket
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 
 
-# 强制所有异常都返回 JSON（不再返回 HTML 500 页面）
-@app.errorhandler(Exception)
-def _err(e):
-    import traceback
-    tb = traceback.format_exc()
-    return '{"success":false,"error":"'+str(e).replace('"','\"').replace('\n',' ')+'","detail":"'+tb[-500:].replace('"','\"').replace('\n','\\n').replace('\r','')+'"}', 500, {'Content-Type': 'application/json; charset=utf-8'}
+def _row(label, value, ok=None):
+    icon = '✅' if ok is True else ('❌' if ok is False else '·')
+    return '<div class="row"><span class="k">%s</span><span class="icon">%s</span><span class="v">%s</span></div>' % (label, icon, str(value).replace('<', '&lt;'))
 
 
 @app.route('/')
 def index():
-    """首页：显示环境变量检查 + 发送按钮"""
     from_email = os.environ.get('ALERT_FROM_EMAIL', '').strip()
     to_email = os.environ.get('ALERT_TO_EMAIL', '').strip()
     smtp_server = os.environ.get('ALERT_SMTP_SERVER', '').strip()
     smtp_port = os.environ.get('ALERT_SMTP_PORT', '').strip()
     password = os.environ.get('ALERT_EMAIL_PASSWORD', '').strip()
 
-    items = [
-        ('ALERT_FROM_EMAIL', from_email if from_email else '(未设置)', bool(from_email)),
-        ('ALERT_TO_EMAIL', to_email if to_email else '(未设置)', bool(to_email)),
-        ('ALERT_SMTP_SERVER', smtp_server if smtp_server else '(未设置)', bool(smtp_server)),
-        ('ALERT_SMTP_PORT', smtp_port if smtp_port else '(未设置)', bool(smtp_port)),
-        ('ALERT_EMAIL_PASSWORD', '已设置（长度 %d）' % len(password) if password else '(未设置)', bool(password)),
-    ]
-
-    rows = ''
-    for k, v, ok in items:
-        v_show = v if k == 'ALERT_SMTP_PORT' or k == 'ALERT_EMAIL_PASSWORD' else v[:30]
-        icon = '✅' if ok else '❌'
-        rows += '<div class="row"><span class="k">%s</span> %s <span class="v">%s</span></div>' % (k, icon, v_show)
+    rows = _row('ALERT_FROM_EMAIL', from_email, bool(from_email))
+    rows += _row('ALERT_TO_EMAIL', to_email, bool(to_email))
+    rows += _row('ALERT_SMTP_SERVER', smtp_server, bool(smtp_server))
+    rows += _row('ALERT_SMTP_PORT', smtp_port, bool(smtp_port))
+    rows += _row('ALERT_EMAIL_PASSWORD', '已设置（长度 %d）' % len(password), len(password) > 0)
 
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>邮件测试</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <style>body{font-family:-apple-system,sans-serif;max-width:640px;margin:30px auto;padding:20px;background:#1e1b4b;color:#fff}
-    h1{margin-bottom:8px}h2{margin:20px 0 12px 0;font-size:17px}
-    .card{background:rgba(255,255,255,0.06);border-radius:14px;padding:20px;margin-bottom:20px;border:1px solid rgba(255,255,255,0.1)}
-    button{background:#6366f1;color:#fff;border:none;padding:14px 28px;border-radius:10px;font-size:15px;cursor:pointer;font-weight:600}
-    button:disabled{opacity:0.5;cursor:not-allowed}
-    .row{padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:14px;display:flex;align-items:center}
-    .k{color:#94a3b8;width:210px;flex-shrink:0}.v{word-break:break-all}
-    #result{margin-top:16px;padding:16px;border-radius:10px;display:none;font-size:14px;line-height:1.7}
-    .tip{background:rgba(99,102,241,0.15);padding:12px 16px;border-radius:10px;font-size:13px;color:#c7d2fe;margin-top:14px;line-height:1.6}
-    .step{background:rgba(16,185,129,0.15);padding:12px 16px;border-radius:10px;font-size:13px;color:#34d399;margin-top:14px;line-height:1.6}
+    <style>body{font-family:-apple-system,sans-serif;max-width:640px;margin:20px auto;padding:20px;background:#1e1b4b;color:#fff;line-height:1.7}
+    h1{margin-bottom:8px}h2{margin:22px 0 14px;font-size:17px}
+    .card{background:rgba(255,255,255,0.06);border-radius:14px;padding:18px 20px;margin-bottom:18px;border:1px solid rgba(255,255,255,0.1)}
+    a.btn{display:inline-block;background:#6366f1;color:#fff;text-decoration:none;padding:14px 28px;border-radius:10px;font-size:15px;font-weight:600;margin-right:10px}
+    .row{padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:14px;display:flex;align-items:center;flex-wrap:wrap}
+    .k{color:#94a3b8;width:220px;flex-shrink:0}.icon{width:30px;text-align:center}.v{word-break:break-all;flex:1;color:#e2e8f0}
+    .ok{background:rgba(16,185,129,0.15);color:#34d399}.fail{background:rgba(239,68,68,0.15);color:#f87171}
+    .small{font-size:13px;color:#94a3b8;margin-top:8px;line-height:1.8}
     </style></head><body>
-    <h1>📧 Gmail 邮件测试</h1>
-    <p style="color:#94a3b8;font-size:14px;margin-bottom:20px">用于验证 Render 环境变量 + Gmail SMTP 是否正常工作</p>
+    <h1>📧 邮件发送测试</h1>
+    <p style="color:#94a3b8;font-size:14px;margin-bottom:20px">自动试 3 种方式：Gmail SSL 465 → Gmail STARTTLS 587 → Outlook STARTTLS 587</p>
 
     <div class="card"><h2>① 环境变量检查</h2>''' + rows + '''
-    <div class="tip">如果显示 ❌，请去 Render → Environment 检查变量是否已保存，然后去 Events 页面等它自动重新部署。</div>
-    </div>
+    <p class="small">有 ❌ 就去 Render → Environment 添加，保存后等自动重新部署。</p></div>
 
     <div class="card"><h2>② 发送测试邮件</h2>
-    <button id="btn" onclick="sendMail()">📤 发送测试邮件</button>
-    <div id="result"></div>
-    </div>
+    <a href="/send" class="btn">📤 点我发送</a>
+    <p class="small">发送最多需要 45 秒（3 个尝试 × 15 秒），请耐心等待页面加载。</p></div>
 
-    <div class="card"><h2>③ 常见问题</h2>
-    <div style="font-size:14px;line-height:1.8;color:#e2e8f0">
-    <p><b>Username and Password not accepted / 需要应用专用密码：</b><br>Gmail 的两步验证账号不能用登录密码。去 Google 账号 → 安全 → 两步验证 → 应用专用密码，生成一个 16 位密码填进来。</p>
-    <p><b>Could not connect / Connection timed out：</b><br>SMTP 服务器地址或端口错误。Gmail 用 smtp.gmail.com，端口 465（SSL）或 587（STARTTLS）。</p>
-    <p><b>Please log in with your web browser and then try again：</b><br>Google 拦截了登录，换一个应用专用密码即可。</p>
-    </div></div>
+    <div class="card"><h2>③ 重要提示</h2>
+    <p class="small"><b>❗ Render 部署必须改 Start Command：</b><br>
+    去 Render → Settings → Build &amp; Deploy → Start Command 改成：<br>
+    <code style="background:rgba(0,0,0,0.3);padding:4px 8px;border-radius:4px">gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120</code><br>
+    （加上 --timeout 120，不然 30 秒就会被 gunicorn 杀掉）</p>
+    <p class="small"><b>Gmail 需要应用专用密码（16 位），不是登录密码。</b></p>
+    <p class="small"><b>Outlook 备选方案：</b>注册一个 Outlook/Hotmail（免费），ALERT_FROM_EMAIL = xxx@outlook.com，密码 = 你的登录密码（或应用专用密码），SMTP_SERVER = smtp-mail.outlook.com，PORT = 587</p></div>
 
-    <script>
-    function sendMail(){
-        var btn=document.getElementById('btn');var r=document.getElementById('result');
-        btn.disabled=true;btn.textContent='发送中...';
-        r.style.display='block';r.style.background='rgba(251,191,36,0.15)';r.style.color='#fbbf24';r.innerHTML='⏳ 正在连接 Gmail SMTP 服务器（最多 30 秒）...';
-        fetch('/send',{method:'POST'}).then(x=>x.json()).then(d=>{
-            if(d.success){r.style.background='rgba(16,185,129,0.15)';r.style.color='#34d399';
-            r.innerHTML='<b style="font-size:16px">✅ 发送成功！</b><br>'+d.message+'<div class="step">📱 现在打开手机 QQ 邮箱 APP，收件箱/垃圾箱里应该能看到测试邮件。<br>然后回你的主项目部署时，用同样的环境变量即可。</div>'}
-            else{r.style.background='rgba(239,68,68,0.15)';r.style.color='#f87171';
-            r.innerHTML='<b style="font-size:16px">❌ 失败</b><br>'+d.error+(d.detail?'<br><br><b>详情：</b><pre style="white-space:pre-wrap;background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;margin-top:8px;font-size:12px">'+d.detail+'</pre>':'')}
-            btn.disabled=false;btn.textContent='📤 发送测试邮件';
-        }).catch(e=>{r.style.background='rgba(239,68,68,0.15)';r.style.color='#f87171';r.innerHTML='请求错误: '+e;btn.disabled=false;btn.textContent='📤 发送测试邮件'});
-    }
-    </script></body></html>
-    '''
+    </body></html>'''
     return html, 200
 
 
-@app.route('/send', methods=['GET', 'POST'])
+def _send_ssl(host, port, from_addr, password, to_addr, msg, timeout=15):
+    """试 SMTP SSL 发送"""
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP_SSL(host, port, context=ctx, timeout=timeout) as s:
+        s.login(from_addr, password)
+        s.sendmail(from_addr, [to_addr], msg.as_string())
+
+
+def _send_starttls(host, port, from_addr, password, to_addr, msg, timeout=15):
+    """试 SMTP STARTTLS 发送"""
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP(host, port, timeout=timeout) as s:
+        s.starttls(context=ctx)
+        s.login(from_addr, password)
+        s.sendmail(from_addr, [to_addr], msg.as_string())
+
+
+@app.route('/send')
 def send():
-    """发邮件接口（GET 也可以直接访问看结果）"""
+    """按顺序试多种 SMTP 方式，全部返回 HTML 页面"""
+    smtp_server = os.environ.get('ALERT_SMTP_SERVER', 'smtp.gmail.com').strip()
+    from_addr = os.environ.get('ALERT_FROM_EMAIL', '').strip()
+    to_addr = os.environ.get('ALERT_TO_EMAIL', '').strip()
+    password = os.environ.get('ALERT_EMAIL_PASSWORD', '').strip()
+    port_str = os.environ.get('ALERT_SMTP_PORT', '465').strip()
+
+    head = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>发送结果</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1"><style>
+    body{font-family:-apple-system,sans-serif;max-width:640px;margin:20px auto;padding:20px;background:#1e1b4b;color:#fff;line-height:1.7}
+    .ok{background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);padding:20px;border-radius:14px;margin-bottom:20px;color:#34d399}
+    .fail{background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);padding:20px;border-radius:14px;margin-bottom:20px;color:#f87171}
+    h1{margin-bottom:8px}p{margin:8px 0}.small{font-size:13px;color:#94a3b8}
+    pre{background:rgba(0,0,0,0.4);padding:14px;border-radius:8px;font-size:12px;white-space:pre-wrap;word-break:break-all;margin-top:10px;color:#cbd5e1}
+    a{display:inline-block;background:#6366f1;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-size:14px;font-weight:600;margin-top:16px;margin-right:10px}
+    .attempt{padding:10px 14px;background:rgba(255,255,255,0.04);border-radius:8px;margin:8px 0;font-size:13px;color:#94a3b8}
+    </style></head><body>'''
+
+    if not from_addr or not to_addr or not password:
+        return head + '<div class="fail"><h1>❌ 环境变量不完整</h1><p>需要在 Render → Environment 设置：<b>ALERT_FROM_EMAIL / ALERT_TO_EMAIL / ALERT_EMAIL_PASSWORD</b></p><p>当前读取：From=%s / To=%s / Server=%s / Port=%s / 密码长度=%d</p><a href="/">返回</a></div></body></html>' % (
+            from_addr[:20] if from_addr else '(空)', to_addr[:20] if to_addr else '(空)',
+            smtp_server[:20] if smtp_server else '(空)', port_str, len(password))
+
     try:
-        smtp_server = os.environ.get('ALERT_SMTP_SERVER', 'smtp.gmail.com').strip()
-        from_addr = os.environ.get('ALERT_FROM_EMAIL', '').strip()
-        to_addr = os.environ.get('ALERT_TO_EMAIL', '').strip()
-        password = os.environ.get('ALERT_EMAIL_PASSWORD', '').strip()
-        port_str = os.environ.get('ALERT_SMTP_PORT', '465').strip()
+        smtp_port = int(port_str)
+    except:
+        smtp_port = 465
 
-        if not from_addr or not to_addr or not password:
-            return jsonify({'success': False, 'error': '环境变量不完整',
-                           'detail': '当前读取到: ALERT_FROM_EMAIL=%s, ALERT_TO_EMAIL=%s, ALERT_SMTP_SERVER=%s, 密码长度=%d' % (
-                               from_addr[:20] if from_addr else '(空)',
-                               to_addr[:20] if to_addr else '(空)',
-                               smtp_server[:20] if smtp_server else '(空)',
-                               len(password))}), 200
+    # 构造邮件
+    msg = MIMEMultipart("alternative")
+    msg['Subject'] = '[ETH EMA 预警] 测试邮件 · %s' % time.strftime('%H:%M:%S')
+    msg['From'] = from_addr
+    msg['To'] = to_addr
+    body = '''<html><body style="font-family:sans-serif;max-width:500px;margin:20px auto;padding:20px">
+    <h2 style="color:#6366f1">✅ 测试邮件发送成功</h2>
+    <p>发件人：%s</p><p>收件人：%s</p>
+    <p>时间：%s</p></body></html>''' % (from_addr, to_addr, time.strftime('%Y-%m-%d %H:%M:%S'))
+    msg.attach(MIMEText(body, 'html', 'utf-8'))
 
-        try: smtp_port = int(port_str)
-        except: smtp_port = 465
+    # 准备要尝试的 SMTP 列表
+    attempts = []
 
-        msg = MIMEMultipart("alternative")
-        msg['Subject'] = '[ETH EMA 预警] 测试邮件 · %s' % time.strftime('%H:%M:%S')
-        msg['From'] = from_addr
-        msg['To'] = to_addr
-        body = '<html><body style="font-family:sans-serif;max-width:500px;margin:20px auto;padding:20px"><h2>OK - 邮件发送成功</h2><p>SMTP: %s:%d</p><p>From: %s</p><p>To: %s</p><p>Time: %s</p></body></html>' % (
-            smtp_server, smtp_port, from_addr, to_addr, time.strftime('%Y-%m-%d %H:%M:%S'))
-        msg.attach(MIMEText(body, 'html', 'utf-8'))
+    # 判断是什么邮箱，选择对应策略
+    is_gmail = '@gmail.com' in from_addr.lower()
+    is_outlook = any(d in from_addr.lower() for d in ['@outlook.com', '@hotmail.com', '@live.com'])
 
-        ctx = ssl.create_default_context()
+    # Gmail 优先试 SSL 465，再试 STARTTLS 587
+    if is_gmail:
+        attempts.append(('Gmail SSL 465', 'smtp.gmail.com', 465, 'ssl'))
+        attempts.append(('Gmail STARTTLS 587', 'smtp.gmail.com', 587, 'starttls'))
+        attempts.append(('Outlook STARTTLS 587（备选）', 'smtp-mail.outlook.com', 587, 'starttls'))
+    elif is_outlook:
+        attempts.append(('Outlook STARTTLS 587', 'smtp-mail.outlook.com', 587, 'starttls'))
+        attempts.append(('Gmail SSL 465（备选）', 'smtp.gmail.com', 465, 'ssl'))
+        attempts.append(('Gmail STARTTLS 587（备选）', 'smtp.gmail.com', 587, 'starttls'))
+    else:
+        # 用户自定义 SMTP
+        if smtp_port == 465:
+            attempts.append(('自定义 SSL 465', smtp_server, 465, 'ssl'))
+            attempts.append(('自定义 STARTTLS 587', smtp_server, 587, 'starttls'))
+        else:
+            attempts.append(('自定义 STARTTLS %d' % smtp_port, smtp_server, smtp_port, 'starttls'))
+            attempts.append(('自定义 SSL 465', smtp_server, 465, 'ssl'))
+        attempts.append(('Gmail SSL 465（备选）', 'smtp.gmail.com', 465, 'ssl'))
 
-        # 先试 SSL 465
-        err_text = ''
+    errors_html = ''
+    for name, host, port, mode in attempts:
         try:
-            with smtplib.SMTP_SSL(smtp_server, smtp_port, context=ctx, timeout=25) as s:
-                s.login(from_addr, password)
-                s.sendmail(from_addr, [to_addr], msg.as_string())
-            return jsonify({'success': True, 'message': 'SSL 465 发送成功！已发送到 %s。请检查 QQ 邮箱收件箱/垃圾箱。' % to_addr}), 200
-        except Exception as e1:
-            err_text = 'SSL465: ' + str(e1)[:200]
+            if mode == 'ssl':
+                _send_ssl(host, port, from_addr, password, to_addr, msg, timeout=15)
+            else:
+                _send_starttls(host, port, from_addr, password, to_addr, msg, timeout=15)
+            return head + '<div class="ok"><h1>✅ %s 发送成功！</h1><p>邮件已发送到：<b>%s</b></p><p>📱 请打开手机 QQ 邮箱 APP → 检查收件箱（没有就看「垃圾箱」「广告邮件」）。</p><p>配置：SMTP 服务器 %s，端口 %d，方式 %s</p>%s<a href="/">返回</a></div></body></html>' % (
+                name, to_addr, host, port, mode.upper(),
+                '<p class="small">下一步：在你的主项目 Render Environment 设置同样的变量，部署新版 web_app.py。</p>' if is_gmail or is_outlook else '')
+        except socket.timeout:
+            errors_html += '<div class="attempt">⏱ %s (%s:%d)：连接超时（Render 服务器连不上这个 SMTP）</div>' % (name, host, port)
+        except Exception as e:
+            err = str(e)[:250]
+            errors_html += '<div class="attempt">❌ %s (%s:%d)：%s</div>' % (name, host, port, err)
 
-        # 再试 STARTTLS 587
-        try:
-            with smtplib.SMTP(smtp_server, 587, timeout=25) as s:
-                s.starttls(context=ctx)
-                s.login(from_addr, password)
-                s.sendmail(from_addr, [to_addr], msg.as_string())
-            return jsonify({'success': True, 'message': 'STARTTLS 587 发送成功！已发送到 %s。请检查 QQ 邮箱收件箱/垃圾箱。' % to_addr}), 200
-        except Exception as e2:
-            err_text += ' | STARTTLS587: ' + str(e2)[:200]
-
-        return jsonify({'success': False, 'error': '两次发送都失败',
-                       'detail': err_text + ' | 配置: server=%s port=%d from=%s to=%s pwd_len=%d' % (
-                           smtp_server, smtp_port, from_addr[:20], to_addr[:20], len(password))}), 200
-    except Exception as e:
-        import traceback
-        return jsonify({'success': False, 'error': '程序异常: ' + str(e),
-                       'detail': traceback.format_exc()[-500:]}), 200
+    # 全部失败
+    return head + '''<div class="fail"><h1>❌ 全部 SMTP 方式都失败了</h1>
+    <p>以下是每个尝试的错误信息：</p>%s
+    <p><b>当前配置：</b></p>
+    <pre>发件人: %s
+收件人: %s
+密码长度: %d
+自定义 SMTP: %s:%s</pre>
+    <p class="small"><b>最可能的原因：</b></p>
+    <p class="small"><b>1. Render 服务器被 Gmail SMTP 拦截（很常见）</b><br>
+    → 换 Outlook 邮箱试试：注册 xxx@outlook.com（免费），ALERT_FROM_EMAIL 改成 Outlook 邮箱，密码用 Outlook 登录密码，SMTP_SERVER=smtp-mail.outlook.com，PORT=587</p>
+    <p class="small"><b>2. Gmail 密码不是应用专用密码</b><br>
+    → 开启两步验证后必须去 Google 账号 → 安全 → 应用专用密码 → 生成 16 位密码</p>
+    <p class="small"><b>3. gunicorn timeout 太短（已经在 Start Command 加上 --timeout 120 了吗？）</b></p>
+    <p class="small"><b>4. 终极方案：SendGrid</b><br>
+    → 注册 sendgrid.com（免费每天 100 封），用 HTTP API 发邮件，绕开 SMTP 问题。这是云端发邮件最可靠的方式。</p>
+    <a href="/">返回重试</a>
+    </div></body></html>
+    ''' % (errors_html, from_addr[:40], to_addr[:40], len(password), smtp_server, port_str)
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print('Gmail 邮件测试工具启动，访问 http://localhost:%d' % port)
+    print('邮件测试启动: http://localhost:%d' % port)
     app.run(host='0.0.0.0', port=port, debug=False)
